@@ -12,6 +12,17 @@ import os
 from urllib.parse import quote
 from typing import Optional, Dict, Tuple
 
+# 延迟导入 logger，避免循环导入
+_logger = None
+
+def _get_logger():
+    """获取 logger 实例（延迟导入）"""
+    global _logger
+    if _logger is None:
+        from astrbot.api import logger as astrbot_logger
+        _logger = astrbot_logger
+    return _logger
+
 # ==================== 配置常量 ====================
 # BattlEye 服务器地址（可配置）
 BATTLEYE_SERVER_HOST = "51.89.97.102"
@@ -40,7 +51,17 @@ def load_cache_from_file() -> Dict[str, str]:
     try:
         with open(CACHE_FILE_PATH, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except Exception:
+    except json.JSONDecodeError as e:
+        _get_logger().warning(f"缓存文件 JSON 格式错误: {e}，将使用空缓存")
+        return {}
+    except PermissionError as e:
+        _get_logger().error(f"无法读取缓存文件（权限不足）: {e}")
+        return {}
+    except OSError as e:
+        _get_logger().error(f"读取缓存文件失败: {e}")
+        return {}
+    except Exception as e:
+        _get_logger().error(f"加载缓存时发生未知错误: {e}", exc_info=True)
         return {}
 
 async def init_cache(cached_data: Dict[str, str]):
@@ -72,8 +93,12 @@ async def save_cache_to_file():
                 json.dump(RID_CACHE, f, ensure_ascii=False, indent=2)
         
         await asyncio.to_thread(_save)
-    except Exception:
-        pass  # 静默失败，不影响主要功能
+    except PermissionError as e:
+        _get_logger().error(f"无法保存缓存文件（权限不足）: {e}")
+    except OSError as e:
+        _get_logger().error(f"保存缓存文件失败（磁盘空间不足或其他系统错误）: {e}")
+    except Exception as e:
+        _get_logger().error(f"保存缓存时发生未知错误: {e}", exc_info=True)
 
 def compute_be_id(rid: int) -> str:
     """计算 BattlEye ID（与原C#代码完全一致）"""
@@ -108,45 +133,86 @@ def _decode_ban_data(ban_data: bytes) -> str:
     # 如果所有编码都失败，返回十六进制表示
     return ban_data.hex()
 
-def _check_ban_reason_sync(rid: int) -> str:
-    """查询BattlEye封禁状态（同步版本，用于在线程池中执行）"""
+class _BattlEyeProtocol(asyncio.DatagramProtocol):
+    """BattlEye UDP 协议处理器"""
+    def __init__(self):
+        self.transport = None
+        self.response = None
+        self.future = asyncio.Future()
+    
+    def connection_made(self, transport):
+        self.transport = transport
+    
+    def datagram_received(self, data, addr):
+        if not self.future.done():
+            self.response = data
+            self.future.set_result(data)
+            if self.transport:
+                self.transport.close()
+    
+    def error_received(self, exc):
+        if not self.future.done():
+            self.future.set_exception(exc)
+            if self.transport:
+                self.transport.close()
+    
+    def connection_lost(self, exc):
+        if not self.future.done() and exc is None:
+            # 连接正常关闭但没有收到响应
+            if self.response is None:
+                self.future.set_exception(asyncio.TimeoutError("未收到响应"))
+
+async def check_ban_reason(rid: int) -> str:
+    """查询BattlEye封禁状态（异步版本，使用原生异步 UDP）"""
+    transport = None
     try:
-        # 使用上下文管理器自动管理 socket 资源
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock_obj:
-            sock_obj.settimeout(BATTLEYE_TIMEOUT)
-            server_address = (BATTLEYE_SERVER_HOST, BATTLEYE_SERVER_PORT)
-            
-            # 生成随机头部数据（4字节）
-            header = bytes([random.randint(0, 255) for _ in range(4)])
-            
-            # 计算BE ID
-            be_id = compute_be_id(rid)
-            
-            # 构建发送数据：4字节随机头部 + BE ID
-            data_to_send = header + be_id.encode('ascii')
-            
-            # 发送数据
-            sock_obj.sendto(data_to_send, server_address)
-            
-            # 接收响应
-            response, _ = sock_obj.recvfrom(1024)
+        loop = asyncio.get_running_loop()
+        server_address = (BATTLEYE_SERVER_HOST, BATTLEYE_SERVER_PORT)
+        
+        # 生成随机头部数据（4字节）
+        header = bytes([random.randint(0, 255) for _ in range(4)])
+        
+        # 计算BE ID
+        be_id = compute_be_id(rid)
+        
+        # 构建发送数据：4字节随机头部 + BE ID
+        data_to_send = header + be_id.encode('ascii')
+        
+        # 创建协议实例
+        protocol = _BattlEyeProtocol()
+        
+        # 创建异步 UDP 端点（绑定到本地任意端口）
+        transport, _ = await loop.create_datagram_endpoint(
+            lambda: protocol,
+            family=socket.AF_INET
+        )
+        
+        # 发送数据
+        transport.sendto(data_to_send, server_address)
+        
+        try:
+            # 等待响应（带超时）
+            response = await asyncio.wait_for(
+                protocol.future,
+                timeout=BATTLEYE_TIMEOUT
+            )
             
             # 跳过前4字节头部，返回封禁原因
             if len(response) > 4:
                 ban_data = response[4:]
                 return _decode_ban_data(ban_data)
             return ""
+        except asyncio.TimeoutError:
+            return "查询超时"
+        finally:
+            if transport and not transport.is_closing():
+                transport.close()
         
-    except socket.timeout:
-        return "查询超时"
     except Exception as e:
+        _get_logger().error(f"查询封禁状态时发生错误: {e}", exc_info=True)
+        if transport and not transport.is_closing():
+            transport.close()
         return f"查询错误: {str(e)}"
-
-async def check_ban_reason(rid: int) -> str:
-    """查询BattlEye封禁状态（异步版本，Python 3.10 兼容）"""
-    # 使用 asyncio.to_thread 将同步 socket 操作放到线程池执行
-    # 这样可以避免阻塞事件循环，同时保持 Python 3.10 兼容性
-    return await asyncio.to_thread(_check_ban_reason_sync, rid)
 
 async def get_rid_from_cache(identifier: str) -> Optional[str]:
     """从缓存获取RID（异步版本）"""
@@ -189,7 +255,11 @@ async def get_rid_from_name(username: str) -> Optional[str]:
                         return str(data["id"])
         return None
             
-    except Exception:
+    except aiohttp.ClientError as e:
+        _get_logger().warning(f"获取用户 {username} 的 RID 时网络请求失败: {e}")
+        return None
+    except Exception as e:
+        _get_logger().error(f"获取用户 {username} 的 RID 时发生未知错误: {e}", exc_info=True)
         return None
 
 async def check_ban_async(identifier: str, use_cache: bool = True) -> Tuple[bool, str]:
