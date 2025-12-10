@@ -5,7 +5,6 @@
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
-import os
 from . import ban_check
 
 @register("astrbot_plugin_be_checker", "oakboat", "查询GTA玩家的BattlEye封禁状态", "1.0.0")
@@ -16,65 +15,62 @@ class BanCheckerPlugin(Star):
     async def initialize(self):
         """插件初始化方法"""
         # 设置缓存文件路径并加载缓存
-        from astrbot.api.star import StarTools
         data_dir = StarTools.get_data_dir(self.context, "astrbot_plugin_be_checker")
-        cache_file = os.path.join(data_dir, "rid_cache.json")
+        cache_file = str(data_dir / "rid_cache.json")
         ban_check.set_cache_file_path(cache_file)
         
-        # 加载已保存的缓存
+        # 加载已保存的缓存（同步操作，仅在初始化时调用）
+        # 初始化阶段直接操作，无需加锁（此时无并发访问）
         cached_data = ban_check.load_cache_from_file()
-        with ban_check.CACHE_LOCK:
-            ban_check.RID_CACHE.update(cached_data)
+        ban_check.RID_CACHE.update(cached_data)
         
         logger.info(f"封禁检查插件已加载，已加载 {len(cached_data)} 条缓存记录")
+
+    async def _handle_check_ban(self, event: AstrMessageEvent, identifier: str, use_cache: bool, loading_msg: str):
+        """处理封禁查询的公共方法"""
+        if not identifier:
+            cmd_name = "查封禁" if use_cache else "查封禁强制"
+            yield event.plain_result(f"请输入要查询的用户名或RID！\n例如：/{cmd_name} oakboat")
+            return
+        
+        # 发送处理中消息
+        yield event.plain_result(loading_msg)
+        
+        # 异步查询
+        success, result = await ban_check.check_ban_async(identifier, use_cache=use_cache)
+        
+        if success:
+            yield event.plain_result(result)
+        else:
+            yield event.plain_result(f"查询失败: {result}")
 
     @filter.command("查封禁", alias={'封禁查询', 'bancheck', 'checkban'})
     async def check_ban(self, event: AstrMessageEvent, identifier: str = None):
         """查询封禁状态（使用缓存）"""
-        if not identifier:
-            yield event.plain_result("请输入要查询的用户名或RID！\n例如：/查封禁 oakboat")
-            return
-        
-        # 发送处理中消息
-        yield event.plain_result("正在查询，请稍候...")
-        
-        # 异步查询
-        success, result = await ban_check.check_ban_async(identifier, use_cache=True)
-        
-        if success:
-            yield event.plain_result(result)
-        else:
-            yield event.plain_result(f"查询失败: {result}")
+        async for result in self._handle_check_ban(
+            event, identifier, use_cache=True, loading_msg="正在查询，请稍候..."
+        ):
+            yield result
 
     @filter.command("查封禁强制", alias={'强制查封禁', 'forcebancheck'})
     async def force_check_ban(self, event: AstrMessageEvent, identifier: str = None):
         """强制重新查询封禁状态（不使用缓存）"""
-        if not identifier:
-            yield event.plain_result("请输入要查询的用户名或RID！\n例如：/查封禁强制 oakboat")
-            return
-        
-        # 发送处理中消息
-        yield event.plain_result("正在强制重新查询（不使用缓存），请稍候...")
-        
-        # 异步查询，不使用缓存
-        success, result = await ban_check.check_ban_async(identifier, use_cache=False)
-        
-        if success:
-            yield event.plain_result(result)
-        else:
-            yield event.plain_result(f"查询失败: {result}")
+        async for result in self._handle_check_ban(
+            event, identifier, use_cache=False, loading_msg="正在强制重新查询（不使用缓存），请稍候..."
+        ):
+            yield result
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("清空缓存")
     async def clear_cache(self, event: AstrMessageEvent):
         """清空RID缓存（仅管理员）"""
-        cache_size = ban_check.clear_cache()
+        cache_size = await ban_check.clear_cache()
         yield event.plain_result(f"✅ 缓存已清空！原缓存大小: {cache_size}")
 
     @filter.command("缓存状态", alias={'查看缓存'})
     async def cache_status(self, event: AstrMessageEvent):
         """查看当前缓存状态"""
-        with ban_check.CACHE_LOCK:
+        async with ban_check.CACHE_LOCK:
             cache_size = len(ban_check.RID_CACHE)
             cache_items = list(ban_check.RID_CACHE.items())[:10]  # 只显示前10个
         

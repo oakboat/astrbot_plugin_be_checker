@@ -1,15 +1,15 @@
 """
-封禁检查核心逻辑模块
+封禁检查核心逻辑模块（完全异步化版本）
 """
 import socket
 import hashlib
 import random
-import requests
+import aiohttp
 import base64
-import threading
 import asyncio
 import json
 import os
+from urllib.parse import quote
 from typing import Optional, Dict, Tuple
 
 # ==================== 配置常量 ====================
@@ -24,7 +24,8 @@ CACHE_FILE_PATH: Optional[str] = None
 # ==================== 缓存管理 ====================
 # 缓存配置 - RID是永久性的，不需要过期时间
 RID_CACHE: Dict[str, str] = {}  # {identifier: rid}
-CACHE_LOCK = threading.RLock()  # 缓存操作的锁
+# 使用 asyncio.Lock 替代 threading.RLock，因为现在是完全异步的
+CACHE_LOCK = asyncio.Lock()
 
 def set_cache_file_path(file_path: str):
     """设置缓存文件路径"""
@@ -32,7 +33,7 @@ def set_cache_file_path(file_path: str):
     CACHE_FILE_PATH = file_path
 
 def load_cache_from_file() -> Dict[str, str]:
-    """从文件加载缓存"""
+    """从文件加载缓存（同步操作，仅在初始化时调用）"""
     if not CACHE_FILE_PATH or not os.path.exists(CACHE_FILE_PATH):
         return {}
     
@@ -42,15 +43,19 @@ def load_cache_from_file() -> Dict[str, str]:
     except Exception:
         return {}
 
-def save_cache_to_file():
-    """保存缓存到文件"""
+async def save_cache_to_file():
+    """保存缓存到文件（异步版本）"""
     if not CACHE_FILE_PATH:
         return
     
     try:
-        os.makedirs(os.path.dirname(CACHE_FILE_PATH), exist_ok=True)
-        with open(CACHE_FILE_PATH, 'w', encoding='utf-8') as f:
-            json.dump(RID_CACHE, f, ensure_ascii=False, indent=2)
+        # 使用 asyncio.to_thread 将文件操作放到线程池执行，避免阻塞
+        def _save():
+            os.makedirs(os.path.dirname(CACHE_FILE_PATH), exist_ok=True)
+            with open(CACHE_FILE_PATH, 'w', encoding='utf-8') as f:
+                json.dump(RID_CACHE, f, ensure_ascii=False, indent=2)
+        
+        await asyncio.to_thread(_save)
     except Exception:
         pass  # 静默失败，不影响主要功能
 
@@ -87,12 +92,15 @@ def _decode_ban_data(ban_data: bytes) -> str:
     # 如果所有编码都失败，返回十六进制表示
     return ban_data.hex()
 
-def check_ban_reason(rid: int) -> str:
-    """查询BattlEye封禁状态"""
-    sock = None
+async def check_ban_reason(rid: int) -> str:
+    """查询BattlEye封禁状态（异步版本）"""
+    sock_obj = None
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(BATTLEYE_TIMEOUT)
+        # 创建非阻塞 UDP socket
+        loop = asyncio.get_event_loop()
+        sock_obj = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock_obj.setblocking(False)
+        
         server_address = (BATTLEYE_SERVER_HOST, BATTLEYE_SERVER_PORT)
         
         # 生成随机头部数据（4字节）
@@ -104,11 +112,17 @@ def check_ban_reason(rid: int) -> str:
         # 构建发送数据：4字节随机头部 + BE ID
         data_to_send = header + be_id.encode('ascii')
         
-        # 发送数据
-        sock.sendto(data_to_send, server_address)
+        # 异步发送数据
+        await loop.sock_sendto(sock_obj, data_to_send, server_address)
         
-        # 接收响应
-        response, _ = sock.recvfrom(1024)
+        # 异步接收响应（带超时）
+        try:
+            response, _ = await asyncio.wait_for(
+                loop.sock_recvfrom(sock_obj, 1024),
+                timeout=BATTLEYE_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            return "查询超时"
         
         # 跳过前4字节头部，返回封禁原因
         if len(response) > 4:
@@ -116,53 +130,56 @@ def check_ban_reason(rid: int) -> str:
             return _decode_ban_data(ban_data)
         return ""
         
-    except socket.timeout:
-        return "查询超时"
     except Exception as e:
         return f"查询错误: {str(e)}"
     finally:
-        if sock:
+        if sock_obj:
             try:
-                sock.close()
+                sock_obj.close()
             except Exception:
                 pass
 
-def get_rid_from_cache(identifier: str) -> Optional[str]:
-    """从缓存获取RID"""
-    with CACHE_LOCK:
+async def get_rid_from_cache(identifier: str) -> Optional[str]:
+    """从缓存获取RID（异步版本）"""
+    async with CACHE_LOCK:
         return RID_CACHE.get(identifier)
 
-def add_rid_to_cache(identifier: str, rid: str):
-    """添加RID到缓存（永不过期）"""
-    with CACHE_LOCK:
+async def add_rid_to_cache(identifier: str, rid: str):
+    """添加RID到缓存（永不过期，异步版本）"""
+    async with CACHE_LOCK:
         RID_CACHE[identifier] = rid
-        save_cache_to_file()  # 持久化缓存
+        await save_cache_to_file()  # 异步持久化缓存
 
-def clear_cache():
-    """清空缓存"""
-    with CACHE_LOCK:
+async def clear_cache() -> int:
+    """清空缓存（异步版本）"""
+    async with CACHE_LOCK:
         cache_size = len(RID_CACHE)
         RID_CACHE.clear()
-        save_cache_to_file()  # 持久化清空操作
+        await save_cache_to_file()  # 异步持久化清空操作
         return cache_size
 
-def get_rid_from_name(username: str) -> Optional[str]:
-    """从用户名获取RID"""
+async def get_rid_from_name(username: str) -> Optional[str]:
+    """从用户名获取RID（异步版本，使用 aiohttp）"""
     try:
-        url = f"https://sc-cache.com/n/{username}"
+        # URL 编码用户名，防止特殊字符导致请求失败
+        encoded_username = quote(username, safe='')
+        url = f"https://sc-cache.com/n/{encoded_username}"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
         
-        if "id" in data:
-            return str(data["id"])
+        # 使用 aiohttp 进行异步 HTTP 请求
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if "id" in data:
+                        return str(data["id"])
         return None
             
-    except Exception as e:
+    except Exception:
         return None
 
-def check_ban_sync(identifier: str, use_cache: bool = True) -> Tuple[bool, str]:
-    """检查封禁状态 - 同步版本
+async def check_ban_async(identifier: str, use_cache: bool = True) -> Tuple[bool, str]:
+    """检查封禁状态 - 完全异步版本
     
     Args:
         identifier: 用户名或RID
@@ -173,13 +190,13 @@ def check_ban_sync(identifier: str, use_cache: bool = True) -> Tuple[bool, str]:
     """
     # 1. 首先尝试从缓存获取
     if use_cache:
-        cached_rid = get_rid_from_cache(identifier)
+        cached_rid = await get_rid_from_cache(identifier)
         if cached_rid:
             rid = cached_rid
             # 直接使用缓存的RID查询封禁状态
             try:
                 rid_int = int(rid)
-                ban_reason = check_ban_reason(rid_int)
+                ban_reason = await check_ban_reason(rid_int)
                 
                 if not ban_reason:
                     return True, f"{identifier} (RID: {rid}) 没有被封禁"
@@ -187,7 +204,7 @@ def check_ban_sync(identifier: str, use_cache: bool = True) -> Tuple[bool, str]:
                     return True, f"{identifier} (RID: {rid}) 已被封禁 - 返回信息: {ban_reason}"
             except ValueError:
                 # 如果RID无效，从缓存中移除并重新获取
-                with CACHE_LOCK:
+                async with CACHE_LOCK:
                     if identifier in RID_CACHE:
                         del RID_CACHE[identifier]
             except Exception as e:
@@ -198,20 +215,20 @@ def check_ban_sync(identifier: str, use_cache: bool = True) -> Tuple[bool, str]:
     if identifier.isdigit():
         rid = identifier
     else:
-        # 尝试从用户名获取（使用 sc-cache.com）
-        rid = get_rid_from_name(identifier)
+        # 尝试从用户名获取（使用 sc-cache.com，异步）
+        rid = await get_rid_from_name(identifier)
     
     if not rid:
         return False, f"错误: 无法获取 {identifier} 的RID"
     
     # 3. 添加到缓存（如果启用缓存）
     if use_cache:
-        add_rid_to_cache(identifier, rid)
+        await add_rid_to_cache(identifier, rid)
     
     # 4. 查询封禁状态
     try:
         rid_int = int(rid)
-        ban_reason = check_ban_reason(rid_int)
+        ban_reason = await check_ban_reason(rid_int)
         
         if not ban_reason:
             return True, f"{identifier} (RID: {rid}) 没有被封禁"
@@ -222,10 +239,3 @@ def check_ban_sync(identifier: str, use_cache: bool = True) -> Tuple[bool, str]:
         return False, f"错误: 无效的RID {rid}"
     except Exception as e:
         return False, f"错误: {str(e)}"
-
-async def check_ban_async(identifier: str, use_cache: bool = True) -> Tuple[bool, str]:
-    """检查封禁状态 - 异步版本"""
-    # 将同步函数包装为异步，避免阻塞事件循环
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, check_ban_sync, identifier, use_cache)
-
