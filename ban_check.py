@@ -8,12 +8,51 @@ import requests
 import base64
 import threading
 import asyncio
+import json
+import os
 from typing import Optional, Dict, Tuple
 
-# ==================== 原有的封禁检查核心代码 ====================
+# ==================== 配置常量 ====================
+# BattlEye 服务器地址（可配置）
+BATTLEYE_SERVER_HOST = "51.89.97.102"
+BATTLEYE_SERVER_PORT = 61455
+BATTLEYE_TIMEOUT = 5
+
+# 缓存文件路径（将在初始化时设置）
+CACHE_FILE_PATH: Optional[str] = None
+
+# ==================== 缓存管理 ====================
 # 缓存配置 - RID是永久性的，不需要过期时间
 RID_CACHE: Dict[str, str] = {}  # {identifier: rid}
 CACHE_LOCK = threading.RLock()  # 缓存操作的锁
+
+def set_cache_file_path(file_path: str):
+    """设置缓存文件路径"""
+    global CACHE_FILE_PATH
+    CACHE_FILE_PATH = file_path
+
+def load_cache_from_file() -> Dict[str, str]:
+    """从文件加载缓存"""
+    if not CACHE_FILE_PATH or not os.path.exists(CACHE_FILE_PATH):
+        return {}
+    
+    try:
+        with open(CACHE_FILE_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_cache_to_file():
+    """保存缓存到文件"""
+    if not CACHE_FILE_PATH:
+        return
+    
+    try:
+        os.makedirs(os.path.dirname(CACHE_FILE_PATH), exist_ok=True)
+        with open(CACHE_FILE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(RID_CACHE, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass  # 静默失败，不影响主要功能
 
 def compute_be_id(rid: int) -> str:
     """计算 BattlEye ID（与原C#代码完全一致）"""
@@ -32,12 +71,29 @@ def compute_be_id(rid: int) -> str:
     
     return md5_hash.lower()
 
+def _decode_ban_data(ban_data: bytes) -> str:
+    """解码封禁数据，尝试多种编码方式"""
+    # 按优先级尝试不同的编码方式
+    encodings = ['ascii', 'utf-8', 'latin-1']
+    
+    for encoding in encodings:
+        try:
+            result = ban_data.decode(encoding, errors='replace').strip()
+            if result:
+                return result
+        except Exception:
+            continue
+    
+    # 如果所有编码都失败，返回十六进制表示
+    return ban_data.hex()
+
 def check_ban_reason(rid: int) -> str:
     """查询BattlEye封禁状态"""
+    sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(5)
-        server_address = ("51.89.97.102", 61455)
+        sock.settimeout(BATTLEYE_TIMEOUT)
+        server_address = (BATTLEYE_SERVER_HOST, BATTLEYE_SERVER_PORT)
         
         # 生成随机头部数据（4字节）
         header = bytes([random.randint(0, 255) for _ in range(4)])
@@ -56,26 +112,8 @@ def check_ban_reason(rid: int) -> str:
         
         # 跳过前4字节头部，返回封禁原因
         if len(response) > 4:
-            # 尝试多种解码方式
             ban_data = response[4:]
-            
-            # 先尝试ASCII
-            try:
-                result = ban_data.decode('ascii').strip()
-                return result if result else ""
-            except UnicodeDecodeError:
-                # 再尝试UTF-8
-                try:
-                    result = ban_data.decode('utf-8').strip()
-                    return result if result else ""
-                except UnicodeDecodeError:
-                    # 最后尝试Latin-1
-                    try:
-                        result = ban_data.decode('latin-1').strip()
-                        return result if result else ""
-                    except UnicodeDecodeError:
-                        # 返回原始字节的十六进制表示
-                        return ban_data.hex()
+            return _decode_ban_data(ban_data)
         return ""
         
     except socket.timeout:
@@ -83,10 +121,11 @@ def check_ban_reason(rid: int) -> str:
     except Exception as e:
         return f"查询错误: {str(e)}"
     finally:
-        try:
-            sock.close()
-        except:
-            pass
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
 
 def get_rid_from_cache(identifier: str) -> Optional[str]:
     """从缓存获取RID"""
@@ -97,12 +136,15 @@ def add_rid_to_cache(identifier: str, rid: str):
     """添加RID到缓存（永不过期）"""
     with CACHE_LOCK:
         RID_CACHE[identifier] = rid
+        save_cache_to_file()  # 持久化缓存
 
 def clear_cache():
     """清空缓存"""
     with CACHE_LOCK:
+        cache_size = len(RID_CACHE)
         RID_CACHE.clear()
-        return len(RID_CACHE)
+        save_cache_to_file()  # 持久化清空操作
+        return cache_size
 
 def get_rid_from_name(username: str) -> Optional[str]:
     """从用户名获取RID"""

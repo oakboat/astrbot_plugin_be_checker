@@ -3,8 +3,9 @@
 命令: /查封禁 <用户名/RID>
 """
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
+import os
 from . import ban_check
 
 @register("astrbot_plugin_be_checker", "oakboat", "查询GTA玩家的BattlEye封禁状态", "1.0.0")
@@ -14,19 +15,22 @@ class BanCheckerPlugin(Star):
 
     async def initialize(self):
         """插件初始化方法"""
-        logger.info("封禁检查插件已加载")
+        # 设置缓存文件路径并加载缓存
+        from astrbot.api.star import StarTools
+        data_dir = StarTools.get_data_dir(self.context, "astrbot_plugin_be_checker")
+        cache_file = os.path.join(data_dir, "rid_cache.json")
+        ban_check.set_cache_file_path(cache_file)
+        
+        # 加载已保存的缓存
+        cached_data = ban_check.load_cache_from_file()
+        with ban_check.CACHE_LOCK:
+            ban_check.RID_CACHE.update(cached_data)
+        
+        logger.info(f"封禁检查插件已加载，已加载 {len(cached_data)} 条缓存记录")
 
     @filter.command("查封禁", alias={'封禁查询', 'bancheck', 'checkban'})
     async def check_ban(self, event: AstrMessageEvent, identifier: str = None):
         """查询封禁状态（使用缓存）"""
-        # 如果参数未自动解析，从消息字符串中提取
-        if not identifier:
-            message_str = event.message_str.strip()
-            # 移除命令部分，获取参数
-            parts = message_str.split(maxsplit=1)
-            if len(parts) > 1:
-                identifier = parts[1].strip()
-        
         if not identifier:
             yield event.plain_result("请输入要查询的用户名或RID！\n例如：/查封禁 oakboat")
             return
@@ -45,14 +49,6 @@ class BanCheckerPlugin(Star):
     @filter.command("查封禁强制", alias={'强制查封禁', 'forcebancheck'})
     async def force_check_ban(self, event: AstrMessageEvent, identifier: str = None):
         """强制重新查询封禁状态（不使用缓存）"""
-        # 如果参数未自动解析，从消息字符串中提取
-        if not identifier:
-            message_str = event.message_str.strip()
-            # 移除命令部分，获取参数
-            parts = message_str.split(maxsplit=1)
-            if len(parts) > 1:
-                identifier = parts[1].strip()
-        
         if not identifier:
             yield event.plain_result("请输入要查询的用户名或RID！\n例如：/查封禁强制 oakboat")
             return
