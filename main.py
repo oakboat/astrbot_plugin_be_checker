@@ -7,7 +7,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from . import ban_check
 
-@register("ban_checker", "YourName", "查询GTA玩家的BattlEye封禁状态", "1.0.0")
+@register("astrbot_plugin_be_checker", "oakboat", "查询GTA玩家的BattlEye封禁状态", "1.0.0")
 class BanCheckerPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
