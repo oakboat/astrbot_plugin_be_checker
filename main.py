@@ -20,9 +20,9 @@ class BanCheckerPlugin(Star):
         ban_check.set_cache_file_path(cache_file)
         
         # 加载已保存的缓存（同步操作，仅在初始化时调用）
-        # 初始化阶段直接操作，无需加锁（此时无并发访问）
         cached_data = ban_check.load_cache_from_file()
-        ban_check.RID_CACHE.update(cached_data)
+        # 使用接口函数初始化缓存
+        await ban_check.init_cache(cached_data)
         
         logger.info(f"封禁检查插件已加载，已加载 {len(cached_data)} 条缓存记录")
 
@@ -70,9 +70,8 @@ class BanCheckerPlugin(Star):
     @filter.command("缓存状态", alias={'查看缓存'})
     async def cache_status(self, event: AstrMessageEvent):
         """查看当前缓存状态"""
-        async with ban_check.CACHE_LOCK:
-            cache_size = len(ban_check.RID_CACHE)
-            cache_items = list(ban_check.RID_CACHE.items())[:10]  # 只显示前10个
+        # 使用接口函数获取缓存状态
+        cache_size, cache_items = await ban_check.get_cache_stats()
         
         status_msg = f"📊 缓存状态\n"
         status_msg += f"缓存条目数: {cache_size}\n\n"

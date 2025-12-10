@@ -43,6 +43,22 @@ def load_cache_from_file() -> Dict[str, str]:
     except Exception:
         return {}
 
+async def init_cache(cached_data: Dict[str, str]):
+    """初始化缓存（接口函数，用于封装）"""
+    async with CACHE_LOCK:
+        RID_CACHE.update(cached_data)
+
+async def get_cache_stats() -> Tuple[int, list]:
+    """获取缓存统计信息（接口函数，用于封装）
+    
+    Returns:
+        (缓存大小, 缓存条目列表（最多10个）)
+    """
+    async with CACHE_LOCK:
+        cache_size = len(RID_CACHE)
+        cache_items = list(RID_CACHE.items())[:10]
+        return cache_size, cache_items
+
 async def save_cache_to_file():
     """保存缓存到文件（异步版本）"""
     if not CACHE_FILE_PATH:
@@ -92,52 +108,45 @@ def _decode_ban_data(ban_data: bytes) -> str:
     # 如果所有编码都失败，返回十六进制表示
     return ban_data.hex()
 
-async def check_ban_reason(rid: int) -> str:
-    """查询BattlEye封禁状态（异步版本）"""
-    sock_obj = None
+def _check_ban_reason_sync(rid: int) -> str:
+    """查询BattlEye封禁状态（同步版本，用于在线程池中执行）"""
     try:
-        # 创建非阻塞 UDP socket
-        loop = asyncio.get_event_loop()
-        sock_obj = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock_obj.setblocking(False)
+        # 使用上下文管理器自动管理 socket 资源
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock_obj:
+            sock_obj.settimeout(BATTLEYE_TIMEOUT)
+            server_address = (BATTLEYE_SERVER_HOST, BATTLEYE_SERVER_PORT)
+            
+            # 生成随机头部数据（4字节）
+            header = bytes([random.randint(0, 255) for _ in range(4)])
+            
+            # 计算BE ID
+            be_id = compute_be_id(rid)
+            
+            # 构建发送数据：4字节随机头部 + BE ID
+            data_to_send = header + be_id.encode('ascii')
+            
+            # 发送数据
+            sock_obj.sendto(data_to_send, server_address)
+            
+            # 接收响应
+            response, _ = sock_obj.recvfrom(1024)
+            
+            # 跳过前4字节头部，返回封禁原因
+            if len(response) > 4:
+                ban_data = response[4:]
+                return _decode_ban_data(ban_data)
+            return ""
         
-        server_address = (BATTLEYE_SERVER_HOST, BATTLEYE_SERVER_PORT)
-        
-        # 生成随机头部数据（4字节）
-        header = bytes([random.randint(0, 255) for _ in range(4)])
-        
-        # 计算BE ID
-        be_id = compute_be_id(rid)
-        
-        # 构建发送数据：4字节随机头部 + BE ID
-        data_to_send = header + be_id.encode('ascii')
-        
-        # 异步发送数据
-        await loop.sock_sendto(sock_obj, data_to_send, server_address)
-        
-        # 异步接收响应（带超时）
-        try:
-            response, _ = await asyncio.wait_for(
-                loop.sock_recvfrom(sock_obj, 1024),
-                timeout=BATTLEYE_TIMEOUT
-            )
-        except asyncio.TimeoutError:
-            return "查询超时"
-        
-        # 跳过前4字节头部，返回封禁原因
-        if len(response) > 4:
-            ban_data = response[4:]
-            return _decode_ban_data(ban_data)
-        return ""
-        
+    except socket.timeout:
+        return "查询超时"
     except Exception as e:
         return f"查询错误: {str(e)}"
-    finally:
-        if sock_obj:
-            try:
-                sock_obj.close()
-            except Exception:
-                pass
+
+async def check_ban_reason(rid: int) -> str:
+    """查询BattlEye封禁状态（异步版本，Python 3.10 兼容）"""
+    # 使用 asyncio.to_thread 将同步 socket 操作放到线程池执行
+    # 这样可以避免阻塞事件循环，同时保持 Python 3.10 兼容性
+    return await asyncio.to_thread(_check_ban_reason_sync, rid)
 
 async def get_rid_from_cache(identifier: str) -> Optional[str]:
     """从缓存获取RID（异步版本）"""
@@ -149,6 +158,11 @@ async def add_rid_to_cache(identifier: str, rid: str):
     async with CACHE_LOCK:
         RID_CACHE[identifier] = rid
         await save_cache_to_file()  # 异步持久化缓存
+
+async def remove_from_cache(identifier: str):
+    """从缓存中移除指定项（异步版本）"""
+    async with CACHE_LOCK:
+        RID_CACHE.pop(identifier, None)
 
 async def clear_cache() -> int:
     """清空缓存（异步版本）"""
@@ -204,9 +218,7 @@ async def check_ban_async(identifier: str, use_cache: bool = True) -> Tuple[bool
                     return True, f"{identifier} (RID: {rid}) 已被封禁 - 返回信息: {ban_reason}"
             except ValueError:
                 # 如果RID无效，从缓存中移除并重新获取
-                async with CACHE_LOCK:
-                    if identifier in RID_CACHE:
-                        del RID_CACHE[identifier]
+                await remove_from_cache(identifier)
             except Exception as e:
                 return False, f"错误: {str(e)}"
     
