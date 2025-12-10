@@ -1,0 +1,111 @@
+"""
+封禁检查插件 - 查询GTA玩家BattlEye封禁状态
+命令: /查封禁 <用户名/RID>
+"""
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.star import Context, Star, register
+from astrbot.api import logger
+from . import ban_check
+
+@register("ban_checker", "YourName", "查询GTA玩家的BattlEye封禁状态", "1.0.0")
+class BanCheckerPlugin(Star):
+    def __init__(self, context: Context):
+        super().__init__(context)
+
+    async def initialize(self):
+        """插件初始化方法"""
+        logger.info("封禁检查插件已加载")
+
+    @filter.command("查封禁", alias={'封禁查询', 'bancheck', 'checkban'})
+    async def check_ban(self, event: AstrMessageEvent, identifier: str = None):
+        """查询封禁状态（使用缓存）"""
+        # 如果参数未自动解析，从消息字符串中提取
+        if not identifier:
+            message_str = event.message_str.strip()
+            # 移除命令部分，获取参数
+            parts = message_str.split(maxsplit=1)
+            if len(parts) > 1:
+                identifier = parts[1].strip()
+        
+        if not identifier:
+            yield event.plain_result("请输入要查询的用户名或RID！\n例如：/查封禁 oakboat")
+            return
+        
+        # 发送处理中消息
+        yield event.plain_result("正在查询，请稍候...")
+        
+        # 异步查询
+        success, result = await ban_check.check_ban_async(identifier, use_cache=True)
+        
+        if success:
+            yield event.plain_result(result)
+        else:
+            yield event.plain_result(f"查询失败: {result}")
+
+    @filter.command("查封禁强制", alias={'强制查封禁', 'forcebancheck'})
+    async def force_check_ban(self, event: AstrMessageEvent, identifier: str = None):
+        """强制重新查询封禁状态（不使用缓存）"""
+        # 如果参数未自动解析，从消息字符串中提取
+        if not identifier:
+            message_str = event.message_str.strip()
+            # 移除命令部分，获取参数
+            parts = message_str.split(maxsplit=1)
+            if len(parts) > 1:
+                identifier = parts[1].strip()
+        
+        if not identifier:
+            yield event.plain_result("请输入要查询的用户名或RID！\n例如：/查封禁强制 oakboat")
+            return
+        
+        # 发送处理中消息
+        yield event.plain_result("正在强制重新查询（不使用缓存），请稍候...")
+        
+        # 异步查询，不使用缓存
+        success, result = await ban_check.check_ban_async(identifier, use_cache=False)
+        
+        if success:
+            yield event.plain_result(result)
+        else:
+            yield event.plain_result(f"查询失败: {result}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("清空缓存")
+    async def clear_cache(self, event: AstrMessageEvent):
+        """清空RID缓存（仅管理员）"""
+        cache_size = ban_check.clear_cache()
+        yield event.plain_result(f"✅ 缓存已清空！原缓存大小: {cache_size}")
+
+    @filter.command("缓存状态", alias={'查看缓存'})
+    async def cache_status(self, event: AstrMessageEvent):
+        """查看当前缓存状态"""
+        with ban_check.CACHE_LOCK:
+            cache_size = len(ban_check.RID_CACHE)
+            cache_items = list(ban_check.RID_CACHE.items())[:10]  # 只显示前10个
+        
+        status_msg = f"📊 缓存状态\n"
+        status_msg += f"缓存条目数: {cache_size}\n\n"
+        
+        if cache_items:
+            status_msg += "最近缓存的条目（最多显示10个）:\n"
+            for identifier, rid in cache_items:
+                status_msg += f"  - {identifier} → RID: {rid}\n"
+        else:
+            status_msg += "缓存为空"
+        
+        yield event.plain_result(status_msg)
+
+    @filter.command("封禁帮助", alias={'banhelp', '封禁插件帮助'})
+    async def help(self, event: AstrMessageEvent):
+        """显示帮助信息"""
+        help_text = (
+            "命令列表:\n"
+            "1. /查封禁 <用户名/RID> - 查询封禁状态（使用缓存）\n"
+            "2. /查封禁强制 <用户名/RID> - 强制重新查询（不使用缓存）\n"
+            "3. /清空缓存 - 清空RID缓存（仅管理员）\n"
+            "4. /缓存状态 - 查看当前缓存状态"
+        )
+        yield event.plain_result(help_text)
+
+    async def terminate(self):
+        """插件销毁方法"""
+        logger.info("封禁检查插件已卸载")
