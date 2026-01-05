@@ -10,7 +10,7 @@ import asyncio
 import json
 import os
 from urllib.parse import quote
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, Union
 
 # 延迟导入 logger，避免循环导入
 _logger = None
@@ -262,19 +262,22 @@ async def get_rid_from_name(username: str) -> Optional[str]:
         _get_logger().error(f"获取用户 {username} 的 RID 时发生未知错误: {e}", exc_info=True)
         return None
 
-async def check_ban_async(identifier: str, use_cache: bool = True) -> Tuple[bool, str]:
+async def check_ban_async(identifier: Union[str, int], use_cache: bool = True) -> Tuple[bool, str]:
     """检查封禁状态 - 完全异步版本
     
     Args:
-        identifier: 用户名或RID
+        identifier: 用户名或RID（可以是字符串或整数）
         use_cache: 是否使用缓存，默认为True
         
     Returns:
         (是否成功, 结果消息)
     """
+    # 统一转换为字符串处理
+    identifier_str = str(identifier)
+    
     # 1. 首先尝试从缓存获取
     if use_cache:
-        cached_rid = await get_rid_from_cache(identifier)
+        cached_rid = await get_rid_from_cache(identifier_str)
         if cached_rid:
             rid = cached_rid
             # 直接使用缓存的RID查询封禁状态
@@ -283,29 +286,29 @@ async def check_ban_async(identifier: str, use_cache: bool = True) -> Tuple[bool
                 ban_reason = await check_ban_reason(rid_int)
                 
                 if not ban_reason:
-                    return True, f"{identifier} (RID: {rid}) 没有被封禁"
+                    return True, f"{identifier_str} (RID: {rid}) 没有被封禁"
                 else:
-                    return True, f"{identifier} (RID: {rid}) 已被封禁 - 返回信息: {ban_reason}"
+                    return True, f"{identifier_str} (RID: {rid}) 已被封禁 - 返回信息: {ban_reason}"
             except ValueError:
                 # 如果RID无效，从缓存中移除并重新获取
-                await remove_from_cache(identifier)
+                await remove_from_cache(identifier_str)
             except Exception as e:
                 return False, f"错误: {str(e)}"
     
     # 2. 缓存未命中或禁用缓存，尝试获取RID
     # 首先检查identifier是否已经是RID（纯数字）
-    if identifier.isdigit():
-        rid = identifier
+    if identifier_str.isdigit():
+        rid = identifier_str
     else:
         # 尝试从用户名获取（使用 sc-cache.com，异步）
-        rid = await get_rid_from_name(identifier)
+        rid = await get_rid_from_name(identifier_str)
     
     if not rid:
-        return False, f"错误: 无法获取 {identifier} 的RID"
+        return False, f"错误: 无法获取 {identifier_str} 的RID"
     
     # 3. 添加到缓存（如果启用缓存）
     if use_cache:
-        await add_rid_to_cache(identifier, rid)
+        await add_rid_to_cache(identifier_str, rid)
     
     # 4. 查询封禁状态
     try:
@@ -313,9 +316,9 @@ async def check_ban_async(identifier: str, use_cache: bool = True) -> Tuple[bool
         ban_reason = await check_ban_reason(rid_int)
         
         if not ban_reason:
-            return True, f"{identifier} (RID: {rid}) 没有被封禁"
+            return True, f"{identifier_str} (RID: {rid}) 没有被封禁"
         else:
-            return True, f"{identifier} (RID: {rid}) 已被封禁 - 返回信息: {ban_reason}"
+            return True, f"{identifier_str} (RID: {rid}) 已被封禁 - 返回信息: {ban_reason}"
                 
     except ValueError:
         return False, f"错误: 无效的RID {rid}"

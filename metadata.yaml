@@ -1,6 +1,6 @@
 name: astrbot_plugin_be_checker # 插件唯一识别名
 display_name: 封禁检查 # 用于展示的名字
 desc: 查询GTA Online玩家的BattlEye封禁状态。支持通过用户名或RID查询，自动缓存RID信息提高查询效率，支持强制重新查询。 # 插件简短描述
-version: v1.0.1 # 插件版本号
+version: v1.0.2 # 插件版本号
 author: oakboat # 作者
 repo: https://github.com/oakboat/astrbot_plugin_be_checker # 插件的仓库地址

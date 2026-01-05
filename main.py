@@ -5,10 +5,10 @@
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
-from typing import Optional
+from typing import Optional, Union
 from . import ban_check
 
-@register("astrbot_plugin_be_checker", "oakboat", "查询GTA玩家的BattlEye封禁状态", "1.0.1")
+@register("astrbot_plugin_be_checker", "oakboat", "查询GTA玩家的BattlEye封禁状态", "1.0.2")
 class BanCheckerPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -28,7 +28,7 @@ class BanCheckerPlugin(Star):
 
         logger.info(f"封禁检查插件已加载，已加载 {len(cached_data)} 条缓存记录")
 
-    async def _handle_check_ban(self, event: AstrMessageEvent, identifier: Optional[str], use_cache: bool, loading_msg: str):
+    async def _handle_check_ban(self, event: AstrMessageEvent, identifier: Optional[Union[str, int]], use_cache: bool, loading_msg: str):
         """处理封禁查询的公共方法"""
         if not identifier:
             cmd_name = "查封禁" if use_cache else "查封禁强制"
@@ -47,7 +47,7 @@ class BanCheckerPlugin(Star):
             yield event.plain_result(f"查询失败: {result}")
 
     @filter.command("查封禁", alias={'封禁查询', 'bancheck', 'checkban'})
-    async def check_ban(self, event: AstrMessageEvent, identifier: Optional[str] = None):
+    async def check_ban(self, event: AstrMessageEvent, identifier: Optional[Union[str, int]] = None):
         """查询封禁状态（使用缓存）"""
         async for result in self._handle_check_ban(
             event, identifier, use_cache=True, loading_msg="正在查询，请稍候..."
@@ -55,7 +55,7 @@ class BanCheckerPlugin(Star):
             yield result
 
     @filter.command("查封禁强制", alias={'强制查封禁', 'forcebancheck'})
-    async def force_check_ban(self, event: AstrMessageEvent, identifier: Optional[str] = None):
+    async def force_check_ban(self, event: AstrMessageEvent, identifier: Optional[Union[str, int]] = None):
         """强制重新查询封禁状态（不使用缓存）"""
         async for result in self._handle_check_ban(
             event, identifier, use_cache=False, loading_msg="正在强制重新查询（不使用缓存），请稍候..."
