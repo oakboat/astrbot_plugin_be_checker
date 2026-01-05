@@ -8,7 +8,7 @@ from astrbot.api import logger
 from typing import Optional
 from . import ban_check
 
-@register("astrbot_plugin_be_checker", "oakboat", "查询GTA玩家的BattlEye封禁状态", "1.0.0")
+@register("astrbot_plugin_be_checker", "oakboat", "查询GTA玩家的BattlEye封禁状态", "1.0.1")
 class BanCheckerPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -16,15 +16,16 @@ class BanCheckerPlugin(Star):
     async def initialize(self):
         """插件初始化方法"""
         # 设置缓存文件路径并加载缓存
-        data_dir = StarTools.get_data_dir(self.context, "astrbot_plugin_be_checker")
+        # 不传入参数，交给 StarTools.get_data_dir 自动根据插件元数据推断插件名
+        data_dir = StarTools.get_data_dir()
         cache_file = str(data_dir / "rid_cache.json")
         ban_check.set_cache_file_path(cache_file)
-        
+
         # 加载已保存的缓存（同步操作，仅在初始化时调用）
         cached_data = ban_check.load_cache_from_file()
         # 使用接口函数初始化缓存
         await ban_check.init_cache(cached_data)
-        
+
         logger.info(f"封禁检查插件已加载，已加载 {len(cached_data)} 条缓存记录")
 
     async def _handle_check_ban(self, event: AstrMessageEvent, identifier: Optional[str], use_cache: bool, loading_msg: str):
