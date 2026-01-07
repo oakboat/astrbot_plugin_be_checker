@@ -4,7 +4,7 @@
 """
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
-from astrbot.api import logger
+from astrbot.api import logger, llm_tool
 from typing import Optional, Union
 from . import ban_check
 
@@ -28,6 +28,10 @@ class BanCheckerPlugin(Star):
 
         logger.info(f"封禁检查插件已加载，已加载 {len(cached_data)} 条缓存记录")
 
+        # 启用函数工具
+        self.context.activate_llm_tool("check_ban_status")
+        self.context.activate_llm_tool("force_check_ban_status")
+
     async def _handle_check_ban(self, event: AstrMessageEvent, identifier: Optional[Union[str, int]], use_cache: bool, loading_msg: str):
         """处理封禁查询的公共方法"""
         if not identifier:
@@ -48,7 +52,11 @@ class BanCheckerPlugin(Star):
 
     @filter.command("查封禁", alias={'封禁查询', 'bancheck', 'checkban'})
     async def check_ban(self, event: AstrMessageEvent, identifier: Optional[Union[str, int]] = None):
-        """查询封禁状态（使用缓存）"""
+        """查询GTA5玩家的BattlEye封禁状态（优先使用缓存）。
+        
+        Args:
+            identifier: 玩家的用户名或RID。
+        """
         async for result in self._handle_check_ban(
             event, identifier, use_cache=True, loading_msg="正在查询，请稍候..."
         ):
@@ -56,7 +64,11 @@ class BanCheckerPlugin(Star):
 
     @filter.command("查封禁强制", alias={'强制查封禁', 'forcebancheck'})
     async def force_check_ban(self, event: AstrMessageEvent, identifier: Optional[Union[str, int]] = None):
-        """强制重新查询封禁状态（不使用缓存）"""
+        """强制重新查询GTA5玩家的BattlEye封禁状态（不使用缓存，直接请求API）。
+        
+        Args:
+            identifier: 玩家的用户名或RID。
+        """
         async for result in self._handle_check_ban(
             event, identifier, use_cache=False, loading_msg="正在强制重新查询（不使用缓存），请稍候..."
         ):
@@ -102,3 +114,24 @@ class BanCheckerPlugin(Star):
     async def terminate(self):
         """插件销毁方法"""
         logger.info("封禁检查插件已卸载")
+
+    # ------------------------- LLM 函数工具 -------------------------
+    @llm_tool("check_ban_status")
+    async def check_ban_status(self, event: AstrMessageEvent, identifier: str) -> str:
+        """查询GTA5玩家的BattlEye封禁状态（优先使用缓存）。
+
+        Args:
+            identifier(string): 玩家的用户名或RID。
+        """
+        success, result = await ban_check.check_ban_async(identifier, use_cache=True)
+        return result
+
+    @llm_tool("force_check_ban_status")
+    async def force_check_ban_status(self, event: AstrMessageEvent, identifier: str) -> str:
+        """强制重新查询GTA5玩家的BattlEye封禁状态（不使用缓存，直接请求API）。
+
+        Args:
+            identifier(string): 玩家的用户名或RID。
+        """
+        success, result = await ban_check.check_ban_async(identifier, use_cache=False)
+        return result
